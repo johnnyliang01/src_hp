@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timbangan IoT</title>
+<style>
+  :root { --bg:#f5f5f2; --card:#fff; --tx:#1a1a1a; --mut:#666; --ac:#0b6e4f; --bd:#ddd; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161616; --card:#222; --tx:#eee; --mut:#999; --ac:#4cc79a; --bd:#383838; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--tx); padding:12px; max-width:560px; margin:auto; }
+  .card { background:var(--card); border:1px solid var(--bd); border-radius:12px; padding:14px; margin-bottom:12px; }
+  .big { font-size:64px; font-weight:700; text-align:center; color:var(--ac); }
+  .mut { color:var(--mut); font-size:13px; text-align:center; }
+  input { width:100%; padding:9px; margin:3px 0 8px; border:1px solid var(--bd); border-radius:8px; background:var(--bg); color:var(--tx); }
+  button { padding:10px 14px; border:0; border-radius:8px; background:var(--ac); color:#fff; font-weight:600; margin-right:6px; }
+  button.sec { background:transparent; color:var(--tx); border:1px solid var(--bd); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  td, th { padding:6px; border-bottom:1px solid var(--bd); text-align:center; }
+  details summary { cursor:pointer; font-weight:600; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="big"><span id="berat">---</span><span style="font-size:24px"> kg</span></div>
+  <div class="mut" id="status">Belum terhubung</div>
+</div>
+
+<div class="card">
+  <details id="set">
+    <summary>Pengaturan MQTT</summary>
+    <label>Broker WebSocket (ws:// atau wss://)</label>
+    <input id="url" placeholder="wss://broker.hivemq.com:8884/mqtt">
+    <label>User</label><input id="user">
+    <label>Password</label><input id="pass" type="password">
+    <label>Topik dasar</label><input id="topic" value="timbangan">
+    <label>ID alat</label><input id="devid" value="timbangan01">
+    <button onclick="connectMq()">Simpan &amp; Hubungkan</button>
+  </details>
+</div>
+
+<div class="card">
+  <button onclick="getLog()">Ambil log alat</button>
+  <button class="sec" onclick="exportCsv()">Ekspor CSV</button>
+  <button class="sec" onclick="clearLocal()">Hapus lokal</button>
+  <table style="margin-top:10px"><thead><tr><th>Tanggal</th><th>Waktu</th><th>kg</th></tr></thead><tbody id="rows"></tbody></table>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let client = null, log = [];
+const F = ["url","user","pass","topic","devid"];
+try { const s = JSON.parse(localStorage.getItem("cfg")||"{}"); F.forEach(k => { if (s[k]) $(k).value = s[k]; }); } catch(e){}
+try { log = JSON.parse(localStorage.getItem("log")||"[]"); } catch(e){}
+if (!$("url").value) $("set").open = true;
+render();
+
+const base = () => $("topic").value.trim() + "/" + $("devid").value.trim();
+
+function connectMq() {
+  const cfg = {}; F.forEach(k => cfg[k] = $(k).value.trim());
+  try { localStorage.setItem("cfg", JSON.stringify(cfg)); } catch(e){}
+  if (client) client.end(true);
+  $("status").textContent = "Menghubungkan...";
+  client = mqtt.connect(cfg.url, { username: cfg.user || undefined, password: cfg.pass || undefined,
+                                    clientId: "hp-" + Math.random().toString(16).slice(2,8), reconnectPeriod: 3000 });
+  client.on("connect", () => { $("status").textContent = "Terhubung"; client.subscribe(base() + "/#"); $("set").open = false; });
+  client.on("close", () => $("status").textContent = "Terputus");
+  client.on("error", e => $("status").textContent = "Error: " + e.message);
+  client.on("message", (t, m) => {
+    const name = t.split("/").pop(), p = m.toString();
+    if (name === "berat") $("berat").textContent = p;
+    else if (name === "status") $("status").textContent = "Alat: " + p;
+    else if (name === "log") { try { const d = JSON.parse(p); addLog(d.tanggal, d.waktu, String(d.berat)); } catch(e){} }
+    else if (name === "logdata") { const a = p.split(","); if (a.length >= 3 && a[0] !== "tanggal") addLog(a[0], a[1], a[2]); }
+  });
+}
+function addLog(d, w, b) {
+  if (d.startsWith("0000")) { const n = new Date(), z = x => String(x).padStart(2,"0");
+    d = n.getFullYear()+"-"+z(n.getMonth()+1)+"-"+z(n.getDate()); w = z(n.getHours())+":"+z(n.getMinutes())+":"+z(n.getSeconds()); }
+  if (log.some(r => r[0]===d && r[1]===w && r[2]===b)) return;
+  log.push([d,w,b]); try { localStorage.setItem("log", JSON.stringify(log)); } catch(e){}
+  render();
+}
+function render() {
+  $("rows").innerHTML = log.slice().reverse().slice(0,200).map(r => "<tr><td>"+r[0]+"</td><td>"+r[1]+"</td><td>"+r[2]+"</td></tr>").join("");
+}
+function getLog() { if (client && client.connected) client.publish(base() + "/cmd", "getlog"); else alert("Hubungkan dulu"); }
+function exportCsv() {
+  const csv = "tanggal,waktu,berat_kg\n" + log.map(r => r.join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
+  a.download = "log_berat.csv"; a.click();
+}
+function clearLocal() { if (confirm("Hapus log di HP ini?")) { log = []; try { localStorage.removeItem("log"); } catch(e){} render(); } }
+if ($("url").value) connectMq();
+</script>
+</body>
+</html>
